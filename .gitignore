@@ -1,0 +1,31 @@
+# clinic-ops 本地 secrets / 产物不入库
+.env
+.env.local
+.env.*.local
+
+# Ansible 实际 inventory 与变量（含公网IP/公钥，模板已入库）
+infra/ansible/inventory.ini
+infra/ansible/vars.yml
+
+# 备份产物与密钥
+*.age
+backup.env
+age.key
+*.key
+ops/backup/backups/
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+dist/
+
+# 练习底稿（教学模板不入库，同 ansible-lab 惯例）
+_old_*/
+_ref/
+_模板/
+
+# 演练输出
+docs/drills/_output/

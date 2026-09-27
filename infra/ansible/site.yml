@@ -1,0 +1,231 @@
+# ======================================================================
+# 云服务器初始化 playbook —— 阿里云 / AWS / 腾讯云通用（Ubuntu 22.04/24.04）
+# 任务08 ansible-lab 的真服务器版：同一套动作，目标从容器换成真机
+# 用法（服务器买好后）：
+#   1. cp inventory.example.ini inventory.ini   # 填公网IP（三云都一样填法）
+#   2. ansible-galaxy collection install community.general  # ufw 模块依赖
+#   3. ssh-copy-id 一次 root@IP（用云厂商给的初始密码/密钥）
+#   4. ansible-playbook -i inventory.ini site.yml
+# 三云差异只有一处：安全组(控制台) vs ufw(本playbook)——两端都要放行 22/80/443
+# ======================================================================
+---
+- name: 初始化云服务器（三云通用）
+  hosts: all
+  become: true
+  vars_files:
+    - vars.yml
+
+  pre_tasks:
+    - name: 断言必填变量已填（缺了直接停，不给半初始化状态）
+      ansible.builtin.assert:
+        that:
+          - admin_user | length > 0
+          - admin_pubkey | length > 0
+          - domain | length > 0
+        fail_msg: "请先填 vars.yml 的 admin_user/admin_pubkey/domain"
+
+  tasks:
+    # ---------- ① 基础装修 ----------
+    - name: 系统更新 + 基础包
+      ansible.builtin.apt:
+        name:
+          - curl
+          - git
+          - vim
+          - ufw
+          - unattended-upgrades
+          - chrony
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: 时间同步 chrony 起服务（证书校验对时间敏感）
+      ansible.builtin.service:
+        name: chrony
+        state: started
+        enabled: true
+
+    # ---------- ② 管理员账号 ----------
+    - name: 建管理员用户
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        groups: sudo
+        shell: /bin/bash
+        state: present
+
+    - name: 配置 sudo 免密（运维自动化需要）
+      ansible.builtin.copy:
+        content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        dest: "/etc/sudoers.d/{{ admin_user }}"
+        mode: "0440"
+        validate: "visudo -cf %s"
+
+    - name: 下发管理员公钥
+      ansible.posix.authorized_key:
+        user: "{{ admin_user }}"
+        key: "{{ admin_pubkey }}"
+        state: present
+
+    # ---------- ③ SSH 加固 ----------
+    - name: SSH 禁 root 密码登录（密钥保留）
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?PermitRootLogin"
+        line: "PermitRootLogin prohibit-password"
+        validate: "/usr/sbin/sshd -t -f %s"
+      notify: restart sshd
+
+    - name: SSH 禁密码认证（只认密钥）
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?PasswordAuthentication"
+        line: "PasswordAuthentication no"
+        validate: "/usr/sbin/sshd -t -f %s"
+      notify: restart sshd
+
+    # ---------- ④ 防火墙 ----------
+    - name: ufw 默认拒绝入站
+      community.general.ufw:
+        default: deny
+        direction: incoming
+
+    - name: ufw 放行 22/80/443
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: ["22", "80", "443"]
+
+    - name: ufw 启用
+      community.general.ufw:
+        state: enabled
+
+    # ---------- ⑤ Docker（官方源，三云通用）----------
+    - name: Docker 官方 GPG key
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        keyring: /etc/apt/keyrings/docker.gpg
+        state: present
+
+    - name: Docker apt 源
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/etc/apt/keyrings/docker.gpg]
+          https://download.docker.com/linux/ubuntu
+          {{ ansible_distribution_release }} stable
+        state: present
+
+    - name: 安装 Docker Engine + Compose 插件
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+
+    - name: 管理员加入 docker 组（免 sudo 用 docker）
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        groups: docker
+        append: true
+
+    - name: Docker 起服务
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    # ---------- ⑥ 宿主 Nginx + certbot（HTTPS）----------
+    - name: 安装 nginx + certbot
+      ansible.builtin.apt:
+        name: [nginx, certbot, python3-certbot-nginx]
+        state: present
+
+    - name: 部署站点 nginx 配置（80 起步，certbot 稍后升级 443）
+      ansible.builtin.template:
+        src: clinic.conf.j2
+        dest: /etc/nginx/sites-available/clinic.conf
+        mode: "0644"
+      notify: reload nginx
+
+    - name: 启用站点
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/clinic.conf
+        dest: /etc/nginx/sites-enabled/clinic.conf
+        state: link
+      notify: reload nginx
+
+    - name: 移除默认站点
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: reload nginx
+
+    # ---------- ⑦ 备份 cron + 环境 ----------
+    - name: 备份工作目录
+      ansible.builtin.file:
+        path: /opt/clinic
+        state: directory
+        owner: "{{ admin_user }}"
+        mode: "0750"
+
+    - name: 安装 age（备份加密工具）
+      ansible.builtin.apt:
+        name: age
+        state: present
+
+    - name: 生成 age 密钥对（私钥留服务器 /opt/clinic）
+      ansible.builtin.shell: |
+        age-keygen -o /opt/clinic/age.key 2>/dev/null
+      args:
+        creates: /opt/clinic/age.key
+
+    - name: 读取 age 公钥（幂等：密钥已存在时从文件提取）
+      ansible.builtin.shell: |
+        grep 'public key:' /opt/clinic/age.key | awk '{print $4}'
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: age_pubkey
+
+    - name: 备份工作目录
+      ansible.builtin.file:
+        path: /opt/clinic/backups
+        state: directory
+        owner: "{{ admin_user }}"
+        mode: "0750"
+
+    - name: 写 backup.env（备份脚本凭据，0600）
+      ansible.builtin.copy:
+        content: |
+          BACKUP_DIR=/opt/clinic/backups
+          BACKUP_KEEP_DAYS=7
+          BACKUP_AGE_PUBKEY={{ age_pubkey.stdout }}
+          BACKUP_REMOTE=
+        dest: /opt/clinic/backup.env
+        mode: "0600"
+
+    - name: 私钥权限收紧
+      ansible.builtin.file:
+        path: /opt/clinic/age.key
+        mode: "0600"
+
+    - name: 每日备份 cron（凌晨 3:30）
+      ansible.builtin.cron:
+        name: clinic mysql backup
+        hour: "3"
+        minute: "30"
+        job: "/opt/clinic/clinic-ops/ops/backup/backup.sh >> /var/log/clinic-backup.log 2>&1"
+
+  handlers:
+    - name: restart sshd
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+
+    - name: reload nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded

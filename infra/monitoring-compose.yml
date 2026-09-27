@@ -1,0 +1,208 @@
+# ======================================================================
+# 监控面：Prometheus + Grafana + Alertmanager + node-exporter（核心四件）
+#       + --profile extra: Loki + Promtail + cAdvisor（4g 加餐）
+#       + ai-bot（AI 运维助手：告警分诊 + 每日巡检）
+# 用法（服务器上）：docker compose -f infra/monitoring-compose.yml --env-file .env up -d
+# ======================================================================
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+networks:
+  clinic-net:
+    external: true
+    name: clinic-net
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: clinic-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=${PROM_RETENTION:-15d}
+    volumes:
+      - prom_data:/prometheus
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/rules.yml:/etc/prometheus/rules.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks: [clinic-net]
+    logging: *default-logging
+    mem_limit: 450m
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: clinic-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD 必填}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+    networks: [clinic-net]
+    logging: *default-logging
+    mem_limit: 250m
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: clinic-alertmanager
+    restart: unless-stopped
+    command:
+      # 单副本：关掉集群 gossip 端口（9094），不与其它节点抱团
+      - --cluster.listen-address=
+      - --config.file=/etc/alertmanager/alertmanager.yml
+    volumes:
+      - alertmanager_data:/alertmanager
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "127.0.0.1:9093:9093"
+    networks: [clinic-net]
+    logging: *default-logging
+    mem_limit: 60m
+
+  # 桥接网内互访（不发布端口=外网不可达）；pid:host + 根文件系统挂载保证主机指标完整
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: clinic-node-exporter
+    restart: unless-stopped
+    pid: host
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=:9100
+    volumes:
+      - /:/host:ro
+    networks: [clinic-net]
+    logging: *default-logging
+    mem_limit: 60m
+
+  mysqld-exporter:
+    image: prom/mysqld-exporter:v0.16.0
+    container_name: clinic-mysqld-exporter
+    restart: unless-stopped
+    command:
+      - --mysqld.address=mysql:3306
+      - --mysqld.username=exporter:${MYSQL_EXPORTER_PASSWORD:-exporter_pw}
+    # 注意：mysql 在 app 栈（另一个 compose 文件），不能跨文件 depends_on；
+    # exporter 自带重连，app 栈起来后自动恢复采集
+    networks: [clinic-net]
+    logging: *default-logging
+    mem_limit: 60m
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    container_name: clinic-redis-exporter
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-clinic_redis}
+    networks: [clinic-net]
+    logging: *default-logging
+    mem_limit: 40m
+
+  # nginx 指标：抓 frontend 容器内 nginx 的 /stub_status（仅内网可达）
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:1.4.1
+    container_name: clinic-nginx-exporter
+    restart: unless-stopped
+    command:
+      - --nginx.scrape-uri=http://frontend/stub_status
+    networks: [clinic-net]
+    logging: *default-logging
+    mem_limit: 40m
+
+  # 黑盒探测：从监控面视角主动探测站点可用性（白盒指标之外的"用户视角"）
+  blackbox:
+    image: prom/blackbox-exporter:v0.25.0
+    container_name: clinic-blackbox
+    restart: unless-stopped
+    networks: [clinic-net]
+    logging: *default-logging
+    mem_limit: 40m
+
+  # AI 运维助手：Alertmanager webhook 分诊 + 每日巡检（P3 核心）
+  ai-bot:
+    build:
+      context: ../ops/ai-bot
+    image: clinic-ai-bot:local
+    container_name: ai-bot
+    restart: unless-stopped
+    environment:
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      TG_BOT_TOKEN: ${TG_BOT_TOKEN:-}
+      TG_CHAT_ID: ${TG_CHAT_ID:-}
+      PROM_URL: http://prometheus:9090
+    depends_on:
+      - prometheus
+    networks: [clinic-net]
+    logging: *default-logging
+    mem_limit: 80m
+
+  loki:
+    image: grafana/loki:3.1.1
+    container_name: clinic-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki_data:/loki
+      - ./monitoring/loki-config.yml:/etc/loki/local-config.yaml:ro
+    networks: [clinic-net]
+    logging: *default-logging
+    mem_limit: 250m
+    profiles: [extra]
+
+  promtail:
+    image: grafana/promtail:3.1.1
+    container_name: clinic-promtail
+    restart: unless-stopped
+    user: root
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./monitoring/promtail-config.yml:/etc/promtail/config.yml:ro
+    depends_on:
+      - loki
+    networks: [clinic-net]
+    logging: *default-logging
+    mem_limit: 120m
+    profiles: [extra]
+
+  cadvisor:
+    # gcr.io 国内不可达 → dockerproxy.net 镜像源 tag
+    image: dockerproxy.net/gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: clinic-cadvisor
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "127.0.0.1:8081:8080"
+    networks: [clinic-net]
+    logging: *default-logging
+    mem_limit: 150m
+    profiles: [extra]
+
+volumes:
+  prom_data:
+    name: clinic_prom_data
+  grafana_data:
+    name: clinic_grafana_data
+  loki_data:
+    name: clinic_loki_data
+  alertmanager_data:
+    name: clinic_alertmanager_data

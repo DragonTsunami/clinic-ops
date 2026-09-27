@@ -1,0 +1,23 @@
+# ======================================================================
+# 服务器上宿主机 Nginx：443 证书终结 → 静态/接口分流到容器
+# 模板变量：__DOMAIN__（Ansible 初始化时替换）
+# 证书：certbot --nginx 自动改写；本文件先保证 80 可用（certbot 需经 80 验证）
+# ======================================================================
+server {
+    listen 80;
+    server_name __DOMAIN__;
+
+    # certbot webroot/插件用
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+
+    # 初始只开 80；certbot 签发后自动插入 443 块与跳转
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# HTTPS 块由 certbot --nginx 自动生成（443 ssl + 80 跳转），不手写避免与 certbot 冲突

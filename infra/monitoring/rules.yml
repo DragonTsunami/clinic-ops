@@ -1,0 +1,88 @@
+# 告警规则：面试讲「告警分级」的实物证据
+# P1 = 立刻处理（服务不可用/数据风险）  P2 = 当天处理（容量/性能劣化）
+groups:
+  - name: p1-availability
+    rules:
+      - alert: BackendDown
+        expr: up{job="backend"} == 0
+        for: 2m
+        labels:
+          severity: P1
+        annotations:
+          summary: "后端进程不可达 ({{ $labels.instance }})"
+          runbook: ops/runbooks/backend-down.md
+
+      - alert: SiteProbeDown
+        expr: probe_success{job="blackbox-http"} == 0
+        for: 2m
+        labels:
+          severity: P1
+        annotations:
+          summary: "站点黑盒探测失败（用户视角不可用）({{ $labels.instance }})"
+          runbook: ops/runbooks/site-down.md
+
+      - alert: MysqlDown
+        expr: up{job="mysqld"} == 0
+        for: 3m
+        labels:
+          severity: P1
+        annotations:
+          summary: "MySQL exporter 不可达（库可能宕机）"
+          runbook: ops/runbooks/mysql-down.md
+
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 3m
+        labels:
+          severity: P1
+        annotations:
+          summary: "Redis exporter 不可达（缓存可能宕机）"
+          runbook: ops/runbooks/redis-down.md
+
+      # 依赖 cAdvisor 指标（--profile extra 加餐才采集）；核心档下不触发不报错
+      - alert: ContainerRestartStorm
+        expr: changes(container_start_time_seconds[10m]) > 3
+        for: 0m
+        labels:
+          severity: P1
+        annotations:
+          summary: "容器 10 分钟内重启超 3 次（crash loop 疑似）"
+          runbook: ops/runbooks/crash-loop.md
+
+  - name: p2-capacity
+    rules:
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}) < 0.2
+        for: 10m
+        labels:
+          severity: P2
+        annotations:
+          summary: "根分区可用空间 < 20%（当前 {{ $value | humanizePercentage }}）"
+          runbook: ops/runbooks/disk-full.md
+
+      - alert: MemoryPressure
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.9
+        for: 10m
+        labels:
+          severity: P2
+        annotations:
+          summary: "内存使用 > 90%（OOM 风险）"
+          runbook: ops/runbooks/memory-pressure.md
+
+      - alert: High5xxRate
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: P2
+        annotations:
+          summary: "5xx 占比 > 5%（持续 5 分钟）"
+          runbook: ops/runbooks/high-5xx.md
+
+      - alert: MysqlTooManyConnections
+        expr: max_over_time(mysql_global_status_threads_connected[5m]) / mysql_global_variables_max_connections > 0.8
+        for: 5m
+        labels:
+          severity: P2
+        annotations:
+          summary: "MySQL 连接数 > max_connections 的 80%"
+          runbook: ops/runbooks/mysql-down.md

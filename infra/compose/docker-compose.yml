@@ -1,0 +1,119 @@
+# ======================================================================
+# 青衫诊所 · 本地编排（本地=生产同构，仅用 .env 换参数，文件不改一字）
+# 用法：cd clinic-ops && docker compose --env-file .env.local up -d --build
+# 端口惯例：127.0.0.1:port（junior 同款）
+# ======================================================================
+name: clinic-ops
+
+# 共享网络：监控栈（prometheus/mysqld-exporter/redis-exporter/blackbox/ai-bot）
+# 通过 external 引用此网络，用容器名互访（Docker DNS）
+networks:
+  clinic-net:
+    name: clinic-net
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  backend:
+    build:
+      context: ../../app/backend   # 相对路径以 compose 文件所在目录为基准
+    image: clinic-backend:local
+    container_name: clinic-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: mysql+pymysql://clinic:${MYSQL_APP_PASSWORD:-clinic_pw}@mysql:3306/clinic?charset=utf8mb4
+      REDIS_URL: redis://:${REDIS_PASSWORD:-clinic_redis}@redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET 必填}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    ports:
+      - "127.0.0.1:8000:8000"   # 本地调试直连后端；生产 override 里删掉这行
+    logging: *default-logging
+    mem_limit: 400m
+    networks: [clinic-net]
+
+  frontend:
+    build:
+      context: ../../app/frontend
+    image: clinic-frontend:local
+    container_name: clinic-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+    ports:
+      - "127.0.0.1:8080:80"     # 浏览器入口 http://127.0.0.1:8080
+    logging: *default-logging
+    mem_limit: 80m
+    networks: [clinic-net]
+
+  mysql:
+    image: mysql:8.4
+    container_name: clinic-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD 必填}
+      MYSQL_DATABASE: clinic
+      MYSQL_USER: clinic
+      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:-clinic_pw}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max_connections=120
+      - --innodb_buffer_pool_size=256M
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ../mysql-init:/docker-entrypoint-initdb.d:ro   # 首次初始化建 exporter 账号
+    healthcheck:
+      # CMD-SHELL 才有变量展开；$$ 让 compose 不插值，留给容器内 shell
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    logging: *default-logging
+    mem_limit: 700m
+    networks: [clinic-net]
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: clinic-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-clinic_redis}   # healthcheck 里 $$REDIS_PASSWORD 引用
+    command: redis-server --requirepass ${REDIS_PASSWORD:-clinic_redis}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      # junior 老坑复用：requirepass 之后 ping 必须带 -a
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: *default-logging
+    mem_limit: 60m
+    networks: [clinic-net]
+
+volumes:
+  mysql_data:
+    name: clinic_mysql_data
+  redis_data:
+    name: clinic_redis_data

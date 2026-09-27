@@ -1,0 +1,68 @@
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # ---- 监控面自监控 ----
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ---- 宿主机（node-exporter 同网桥接，Docker DNS 互访）----
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # ---- 应用栈容器（Docker DNS 容器名互访）----
+  - job_name: backend
+    static_configs:
+      - targets: ["backend:8000"]
+    # prometheus-client 的 asgi 挂载点 /metrics 会 307 到 /metrics/（带斜杠）
+    metrics_path: /metrics/
+
+  # frontend 的可用性由 blackbox-http 探测覆盖、请求量由 nginx job 覆盖；
+  # 不再裸抓 frontend:80（无 /metrics 端点，纯噪音）
+
+  # nginx 指标：stub_status 页面由 frontend 容器内 nginx 暴露（allow 172.16/12 仅内网）
+  - job_name: nginx
+    static_configs:
+      - targets: ["nginx-exporter:9113"]
+
+  - job_name: mysqld
+    static_configs:
+      - targets: ["mysqld-exporter:9104"]
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+
+  # ---- 黑盒：探测经 nginx 的完整链路（本地 8080；生产为域名，见 .env）----
+  # 生产改 static_config 为 http://<你的域名>/（或走公网 https）
+  - job_name: blackbox-http
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - http://frontend/
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  # ---- cAdvisor（--profile extra 时启用）----
+  # 上加餐后取消注释即可
+  # - job_name: cadvisor
+  #   static_configs:
+  #     - targets: ["cadvisor:8080"]

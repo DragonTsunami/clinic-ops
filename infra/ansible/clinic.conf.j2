@@ -1,0 +1,16 @@
+# 宿主 Nginx 站点配置（Ansible template 渲染 clinic.conf.j2）
+# 80 起步给 certbot 验证；签发后 certbot --nginx 自动升级 443
+server {
+    listen 80;
+    server_name {{ domain }};
+
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

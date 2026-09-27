@@ -1,0 +1,75 @@
+# ======================================================================
+# 部署流水线（服务器就位后启用）：
+#   push main → lint → build 镜像 → 推 GHCR → SSH 到服务器 pull + 重启
+# 初期（无服务器）：前两个 job 也会跑，验证每次提交
+# 前置 secrets（仓库 Settings → Secrets and variables → Actions）：
+#   DEPLOY_SSH_KEY   服务器 devops 用户的私钥
+#   DEPLOY_HOST      服务器公网 IP
+#   DEPLOY_USER      devops
+# ======================================================================
+name: clinic-ops CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: compose 配置校验
+        run: |
+          cd infra/compose
+          JWT_SECRET=x MYSQL_ROOT_PASSWORD=x MYSQL_APP_PASSWORD=x GRAFANA_ADMIN_PASSWORD=x \
+            docker compose -f docker-compose.yml config -q
+      - name: prometheus 规则校验
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$GITHUB_WORKSPACE/infra/monitoring:/etc/prometheus" \
+            prom/prometheus:v2.54.1 check config /etc/prometheus/prometheus.yml
+
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: app/backend
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ghcr.io/${{ github.repository }}/backend:latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: app/frontend
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ghcr.io/${{ github.repository }}/frontend:latest
+
+  # 服务器就绪后取消注释；先跑 GHCR 手动 pull 流程也可以
+  # deploy:
+  #   needs: build
+  #   runs-on: ubuntu-latest
+  #   if: github.ref == 'refs/heads/main'
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: SSH 部署
+  #       uses: appleboy/ssh-action@v1
+  #       with:
+  #         host: ${{ secrets.DEPLOY_HOST }}
+  #         username: ${{ secrets.DEPLOY_USER }}
+  #         key: ${{ secrets.DEPLOY_SSH_KEY }}
+  #         script: |
+  #           cd /opt/clinic/clinic-ops
+  #           git pull origin main
+  #           docker compose --env-file .env -f infra/compose/docker-compose.yml -f infra/compose/docker-compose.prod.yml pull backend frontend
+  #           docker compose --env-file .env -f infra/compose/docker-compose.yml -f infra/compose/docker-compose.prod.yml up -d
+  #           docker image prune -f

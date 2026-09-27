@@ -1,0 +1,8 @@
+# ======================================================================
+# 生产叠加层（服务器上用）：docker compose -f infra/compose/docker-compose.yml
+#   -f infra/compose/docker-compose.prod.yml --env-file .env up -d
+# 差异：后端不暴露宿主端口（nginx 反代走 docker 网络容器名互访）
+# ======================================================================
+services:
+  backend:
+    ports: []    # 收掉 127.0.0.1:8000，只留在 docker 网内
