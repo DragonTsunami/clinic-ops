@@ -23,6 +23,14 @@ const router = useRouter();
 
 async function submit() {
   msg.value = "";
+  if (!/^1\d{10}$/.test(phone.value)) {
+    msg.value = "手机号格式不正确：需 11 位、以 1 开头";
+    return;
+  }
+  if (!password.value) {
+    msg.value = "请输入密码";
+    return;
+  }
   try {
     const { data } = await api.post("/auth/login", {
       phone: phone.value,

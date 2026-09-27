@@ -2,6 +2,7 @@
 import logging
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_client import Counter, make_asgi_app
@@ -37,6 +38,32 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 参数校验失败(422)统一翻译成人话：Pydantic 默认吐英文结构体，前端没法直接展示
+_FIELD_NAMES = {"name": "姓名", "phone": "手机号", "password": "密码"}
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_handler(request: Request, exc: RequestValidationError):
+    msgs = []
+    for err in exc.errors():
+        field = err.get("loc", [])[-1] if err.get("loc") else ""
+        name = _FIELD_NAMES.get(field, field)
+        etype = err.get("type", "")
+        if etype == "string_pattern_mismatch":
+            msgs.append(f"{name}格式不正确（手机号需 11 位、以 1 开头）" if field == "phone"
+                        else f"{name}格式不正确")
+        elif etype == "string_too_short":
+            msgs.append(f"{name}太短（密码至少 6 位）" if field == "password"
+                        else f"{name}不能为空")
+        elif etype == "string_too_long":
+            msgs.append(f"{name}太长了")
+        elif etype == "missing":
+            msgs.append(f"请填写{name}")
+        else:
+            msgs.append(f"{name}填写有误")
+    detail = "；".join(msgs) or "填写内容有误，请检查后重试"
+    return JSONResponse(status_code=422, content={"detail": detail})
 
 
 @app.on_event("startup")

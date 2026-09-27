@@ -17,12 +17,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 class RegisterIn(BaseModel):
     name: str = Field(min_length=1, max_length=32)
     phone: str = Field(pattern=r"1\d{10}")  # 演示用中国大陆手机号格式
-    password: str = Field(min_length=6, max_length=64)
+    password: str = Field(min_length=6, max_length=64, description="至少 6 位")
 
 
 class LoginIn(BaseModel):
-    phone: str
-    password: str
+    phone: str = Field(pattern=r"1\d{10}", description="11 位手机号")
+    password: str = Field(min_length=6, max_length=64)
 
 
 class TokenOut(BaseModel):
