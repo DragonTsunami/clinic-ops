@@ -38,6 +38,10 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+      # GHCR 镜像路径必须全小写；仓库名 DragonTsunami 带大写，直接引用 ${{ github.repository }} 会 invalid reference format
+      - name: 仓库名转小写
+        id: img
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -47,12 +51,12 @@ jobs:
         with:
           context: app/backend
           push: ${{ github.ref == 'refs/heads/main' }}
-          tags: ghcr.io/${{ github.repository }}/backend:latest
+          tags: ghcr.io/${{ steps.img.outputs.name }}/backend:latest
       - uses: docker/build-push-action@v6
         with:
           context: app/frontend
           push: ${{ github.ref == 'refs/heads/main' }}
-          tags: ghcr.io/${{ github.repository }}/frontend:latest
+          tags: ghcr.io/${{ steps.img.outputs.name }}/frontend:latest
 
   # 服务器就绪后取消注释；先跑 GHCR 手动 pull 流程也可以
   # deploy:
